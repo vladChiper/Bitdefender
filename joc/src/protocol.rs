@@ -23,6 +23,7 @@ pub enum Command {
     
 }
 
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebSocketMessage {
     pub command: Command,
