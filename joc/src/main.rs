@@ -111,7 +111,7 @@ async fn main() -> anyhow::Result<()> {
             },
             Command::Practice => {
                 println!("You are in practice mode!");
-            }
+            },
             Command::StartMatch => {
                 println!("The match has started!");
                 
@@ -126,37 +126,76 @@ async fn main() -> anyhow::Result<()> {
 
             }
             Command::StartTurn => {
-                // Deserializăm argumentele specifice pentru turnul curent
-                let args: StartTurnArgs = serde_json::from_value(message.args.clone())
-                    .context("Parsing StartTurnArgs")?;
+            let args: StartTurnArgs = serde_json::from_value(message.args.clone())
+                .context("Parsing StartTurnArgs")?;
 
-                println!("Turnul: {}", args.turn);
-                let mut rng = rand::thread_rng();
+            println!("Turnul: {}", args.turn);
+            let mut rng = rand::thread_rng();
 
-                // Identificăm eroii care ne aparțin folosind my_player_id salvat anterior
-                let my_heroes: Vec<&Hero> = args.state.heroes.iter()
-                    .filter(|h| h.owner_id == my_player_id)
-                    .collect();
+            // 1. Împărțim eroii vizibili între ai noștri și inamici
+            let my_heroes: Vec<&Hero> = args.state.heroes.iter()
+                .filter(|h| h.owner_id == my_player_id)
+                .collect();
 
-                for hero in my_heroes {
-                    // Generăm o deplasare aleatorie pe axele X și Y (-1, 0, sau 1)
+            let enemy_heroes: Vec<&Hero> = args.state.heroes.iter()
+                .filter(|h| h.owner_id != my_player_id)
+                .collect();
+
+            // 2. Iterăm prin fiecare erou pe care îl controlăm
+            for hero in my_heroes {
+                let mut action_sent = false;
+
+                // Dacă arma este încărcată (cooldown == 0) și VEDEM un inamic
+                if hero.cooldown == 0 && !enemy_heroes.is_empty() {
+                    // Țintim primul inamic vizibil din listă
+                    let target = enemy_heroes[0];
+
+                    let shoot_command = WebSocketMessage {
+                        command: Command::Shoot,
+                        args: serde_json::to_value(ShootArgs {
+                            hero_id: hero.id,
+                            x: target.x,
+                            y: target.y,
+                        })?,
+                    };
+
+                    send_command(&mut write, shoot_command).await?;
+                    println!("💥 Eroul {} trage spre inamicul de la ({}, {})!", hero.id, target.x, target.y);
+                    action_sent = true;
+                }
+
+                if !action_sent { // daca nu am tras
+                    // Aici putem pune logica de Pathfinding mai târziu. 
+                    // Momentan păstrăm mișcarea direcțională aleatorie din codul tău.
                     let dx = rng.gen_range(-1..=1);
                     let dy = rng.gen_range(-1..=1);
 
-                    // Trimitem comanda MOVE folosind varianta din Enum
+
+                    // Evităm să stăm pe loc, forțăm o mișcare dacă dx și dy sunt ambele 0
+                    let (final_dx, final_dy) = if dx == 0 && dy == 0 {
+                        (1, 0) 
+                    } else {
+                        (dx, dy)
+                    };
+
+                    // Înmulțim direcția cu 10 ca ținta să iasă clar din footprint-ul de 3x3 al eroului
+                    let target_x = hero.x + (final_dx * 10);
+                    let target_y = hero.y + (final_dy * 10);
+
                     let move_command = WebSocketMessage {
-                        command: Command::Move, // Corectat: folosim Enum-ul, nu String
+                        command: Command::Move,
                         args: serde_json::to_value(MoveArgs {
                             hero_id: hero.id,
-                            x: hero.x + dx,
-                            y: hero.y + dy,
+                            x: target_x,
+                            y: target_y,
                         })?,
                     };
 
                     send_command(&mut write, move_command).await?;
-                    println!("Eroul {} se mișcă la coordonatele ({}, {})", hero.id, hero.x + dx, hero.y + dy);
+                    println!("🏃 Eroul {} se mișcă cu intenția spre ({}, {})", hero.id, target_x, target_y);
+                    }
                 }
-            }
+            },
             Command::Move => {
                 println!("Move command received!");
                 
