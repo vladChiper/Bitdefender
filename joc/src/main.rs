@@ -147,17 +147,22 @@ async fn main() -> anyhow::Result<()> {
                     .filter(|h| h.owner_id != my_player_id)
                     .collect();
 
-                // ACTUALIZAREA MEMORIEI
+                // 1. ACTUALIZAREA MEMORIEI
                 for enemy in &enemy_heroes {
                     last_known_enemies.insert(enemy.id, (enemy.x, enemy.y));
                 }
 
+                // 2. ALEGEREA ȚINTEI PRINCIPALE (FOCUS FIRE)
+                // Găsim inamicul vizibil cu cel mai mic HP
+                let primary_target = enemy_heroes.iter().min_by_key(|e| e.hp).copied();
+
                 for hero in my_heroes {
                     let mut action_sent = false;
 
-                    // 1. FAZA DE TRAGERE
+                    // 3. FAZA DE TRAGERE (Focus Fire)
                     if hero.cooldown == 0 && !enemy_heroes.is_empty() {
-                        for target in &enemy_heroes {
+                        // Încercăm prima dată să tragem în ținta principală
+                        if let Some(target) = primary_target {
                             if utils::has_line_of_sight(&world_grid, hero.x, hero.y, target.x, target.y) {
                                 let shoot_command = WebSocketMessage {
                                     command: Command::Shoot,
@@ -168,57 +173,79 @@ async fn main() -> anyhow::Result<()> {
                                     })?,
                                 };
                                 send_command(&mut write, shoot_command).await?;
-                                println!("💥 Eroul {} trage spre ({}, {})!", hero.id, target.x, target.y);
+                                println!("🎯 Eroul {} dă FOCUS FIRE pe inamicul {} la ({}, {})!", hero.id, target.id, target.x, target.y);
                                 action_sent = true;
-                                break; 
+                            }
+                        }
+
+                        // Dacă e blocat peretele spre ținta principală, tragem în orice alt inamic vizibil
+                        if !action_sent {
+                            for target in &enemy_heroes {
+                                if utils::has_line_of_sight(&world_grid, hero.x, hero.y, target.x, target.y) {
+                                    let shoot_command = WebSocketMessage {
+                                        command: Command::Shoot,
+                                        args: serde_json::to_value(ShootArgs {
+                                            hero_id: hero.id,
+                                            x: target.x,
+                                            y: target.y,
+                                        })?,
+                                    };
+                                    send_command(&mut write, shoot_command).await?;
+                                    println!("💥 Eroul {} trage spre inamicul {} la ({}, {})!", hero.id, target.id, target.x, target.y);
+                                    action_sent = true;
+                                    break; 
+                                }
                             }
                         }
                     }
 
-                    // Ne miscam daca nu avem in cine sa tragem sau daca suntem in cooldown
+                    // 4. FAZA DE MIȘCARE INTELIGENTĂ
                     if !action_sent {
-                        let mut  next_pos; // Variabilă pentru a reține mutarea finală
+                        let mut next_pos = (hero.x, hero.y);
 
                         // VERIFICĂM COOLDOWN-UL PENTRU DODGE
                         if hero.cooldown > 0 {
-                            // Suntem pe cooldown, deci facem o mișcare aleatorie (dodge)
                             next_pos = utils::get_random_valid_move(&world_grid, hero.x, hero.y);
-                            println!("🤸 Eroul {} face un dodge tactic spre ({}, {})! (cooldown rămas: {})", 
+                            println!("🤸 Eroul {} face dodge tactic spre ({}, {})! (cooldown: {})", 
                                 hero.id, next_pos.0, next_pos.1, hero.cooldown);
                         } else {
-                            // Nu suntem pe cooldown, dar nu am avut pe cine să împușcăm -> Avansăm tactic
+                            // CĂUTARE / FLANCARE
                             let mut target_x = hero.x;
                             let mut target_y = hero.y;
 
-                            if !last_known_enemies.is_empty() {
-                                // Dacă avem inamici în memorie, luăm coordonatele primului din map
+                            if let Some(target) = primary_target {
+                                // Dacă îl vedem acum, mergem direct pe el
+                                target_x = target.x;
+                                target_y = target.y;
+                            } else if !last_known_enemies.is_empty() {
+                                // Dacă l-am văzut în trecut, mergem acolo
                                 if let Some((_id, &(ex, ey))) = last_known_enemies.iter().next() {
                                     target_x = ex;
                                     target_y = ey;
                                 }
                             } else {
-                                // Dacă n-am văzut pe nimeni, mergem implicit spre "baza" adversă
-                                // Dacă jucătorul tău e sus (id 0), vrei să mergi jos (harta are Y crescător spre jos)
+                                // Implicit: avansăm spre baza adversă
                                 target_y = if my_player_id == 0 { map_height - 2 } else { 1 };
                             }
+
+                            // FLANCARE: Adăugăm un offset pe X pentru ca eroii să nu se suprapună (pierd vision range)
+                            let offset = if hero.id % 2 == 0 { -6 } else { 6 };
+                            target_x = (target_x + offset).clamp(1, map_width - 2);
 
                             // Asigurăm alinierea țintei la regula de centre (x % 3 == 1)
                             target_x = target_x - (target_x.rem_euclid(3)) + 1;
                             target_y = target_y - (target_y.rem_euclid(3)) + 1;
 
-                            // Folosim BFS pentru a afla următorul pas logic
                             next_pos = utils::bfs_next_step(&world_grid, (hero.x, hero.y), (target_x, target_y));
 
-                            // Fallback: Dacă BFS dă fail (stă pe loc), facem o mișcare random ca să nu blocăm botul
                             if next_pos == (hero.x, hero.y) {
                                 next_pos = utils::get_random_valid_move(&world_grid, hero.x, hero.y);
                             }
                             
-                            println!("🏃 Eroul {} se îndreaptă spre ținta ({}, {}) făcând pasul la ({}, {})", 
+                            println!("🏃 Eroul {} avansează tactic (flancare) spre ({}, {}) -> face pasul la ({}, {})", 
                                 hero.id, target_x, target_y, next_pos.0, next_pos.1);
                         }
 
-                        // TRIMITEM COMANDA DE MUTARE (indiferent dacă e dodge sau avansare)
                         let move_command = WebSocketMessage {
                             command: Command::Move,
                             args: serde_json::to_value(MoveArgs {
