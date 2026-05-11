@@ -3,6 +3,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use std::collections::HashMap;
+use std::collections::VecDeque;
 
 mod protocol;
 mod utils; // Modulul nou creat
@@ -81,11 +82,25 @@ async fn main() -> anyhow::Result<()> {
                 if err.fatal { break; }
             }
             Command::Ready => {
-                println!("Suntem gata! Începem Practice...");
+                println!("Suntem gata! Începem...");
+
+                //Ranked mode
                 let setup_msg = WebSocketMessage {
-                    command: Command::Practice,
-                    args: serde_json::json!({"seed": null}),
+                    command: Command::Challenge,
+                    args: serde_json::json!({"seed": null,
+                    "ranked": true
+                    }),
                 };
+
+                //Practice mode
+
+                // let setup_msg = WebSocketMessage {
+                //     command: Command::Practice,
+                //     args: serde_json::json!({
+                //         "seed": null
+                //     }),
+                // };
+
                 send_command(&mut write, setup_msg).await.expect("Failed to start practice");
             }
             Command::Challenge => println!("You have been challenged!"),
@@ -160,35 +175,50 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
 
-                    // 2. FAZA DE MIȘCARE INTELIGENTĂ
+                    // Ne miscam daca nu avem in cine sa tragem sau daca suntem in cooldown
                     if !action_sent {
-                        let mut target_x = hero.x;
-                        let mut target_y = hero.y;
+                        let mut  next_pos; // Variabilă pentru a reține mutarea finală
 
-                        if !last_known_enemies.is_empty() {
-                            // Dacă avem inamici în memorie, luăm coordonatele primului din map
-                           if let Some((_id, &(ex, ey))) = last_known_enemies.iter().next() {
-                                target_x = ex;
-                                target_y = ey;
-                            }
-                        } else {
-                            // Dacă n-am văzut pe nimeni, mergem implicit spre "baza" adversă
-                            // Dacă jucătorul tău e sus (id 0), vrei să mergi jos (harta are Y crescător spre jos)
-                            target_y = if my_player_id == 0 { map_height - 2 } else { 1 };
-                        }
-
-                        // Asigurăm alinierea țintei la regula de centre (x % 3 == 1)
-                        target_x = target_x - (target_x.rem_euclid(3)) + 1;
-                        target_y = target_y - (target_y.rem_euclid(3)) + 1;
-
-                        // Folosim BFS pentru a afla următorul pas logic
-                        let mut next_pos = utils::bfs_next_step(&world_grid, (hero.x, hero.y), (target_x, target_y));
-
-                        // Fallback: Dacă BFS dă fail (stă pe loc), facem o mișcare random ca să nu blocăm botul
-                        if next_pos == (hero.x, hero.y) {
+                        // VERIFICĂM COOLDOWN-UL PENTRU DODGE
+                        if hero.cooldown > 0 {
+                            // Suntem pe cooldown, deci facem o mișcare aleatorie (dodge)
                             next_pos = utils::get_random_valid_move(&world_grid, hero.x, hero.y);
+                            println!("🤸 Eroul {} face un dodge tactic spre ({}, {})! (cooldown rămas: {})", 
+                                hero.id, next_pos.0, next_pos.1, hero.cooldown);
+                        } else {
+                            // Nu suntem pe cooldown, dar nu am avut pe cine să împușcăm -> Avansăm tactic
+                            let mut target_x = hero.x;
+                            let mut target_y = hero.y;
+
+                            if !last_known_enemies.is_empty() {
+                                // Dacă avem inamici în memorie, luăm coordonatele primului din map
+                                if let Some((_id, &(ex, ey))) = last_known_enemies.iter().next() {
+                                    target_x = ex;
+                                    target_y = ey;
+                                }
+                            } else {
+                                // Dacă n-am văzut pe nimeni, mergem implicit spre "baza" adversă
+                                // Dacă jucătorul tău e sus (id 0), vrei să mergi jos (harta are Y crescător spre jos)
+                                target_y = if my_player_id == 0 { map_height - 2 } else { 1 };
+                            }
+
+                            // Asigurăm alinierea țintei la regula de centre (x % 3 == 1)
+                            target_x = target_x - (target_x.rem_euclid(3)) + 1;
+                            target_y = target_y - (target_y.rem_euclid(3)) + 1;
+
+                            // Folosim BFS pentru a afla următorul pas logic
+                            next_pos = utils::bfs_next_step(&world_grid, (hero.x, hero.y), (target_x, target_y));
+
+                            // Fallback: Dacă BFS dă fail (stă pe loc), facem o mișcare random ca să nu blocăm botul
+                            if next_pos == (hero.x, hero.y) {
+                                next_pos = utils::get_random_valid_move(&world_grid, hero.x, hero.y);
+                            }
+                            
+                            println!("🏃 Eroul {} se îndreaptă spre ținta ({}, {}) făcând pasul la ({}, {})", 
+                                hero.id, target_x, target_y, next_pos.0, next_pos.1);
                         }
 
+                        // TRIMITEM COMANDA DE MUTARE (indiferent dacă e dodge sau avansare)
                         let move_command = WebSocketMessage {
                             command: Command::Move,
                             args: serde_json::to_value(MoveArgs {
@@ -198,12 +228,36 @@ async fn main() -> anyhow::Result<()> {
                             })?,
                         };
                         send_command(&mut write, move_command).await?;
-                        println!("🏃 Eroul {} se îndreaptă spre ținta ({}, {})", hero.id, target_x, target_y);
                     }
                 }
             }
             Command::Move => (),
             Command::Shoot => (),
+            Command::EndMatch => {
+                let args: protocol::EndMatchArgs = serde_json::from_value(message.args.clone())
+                    .context("Parsing EndMatchArgs")?;
+
+                println!("🏁 Meciul s-a terminat! Motiv: {}", args.reason);
+                
+                match args.winner {
+                    Some(ref name) if name == "vladChiper" => {
+                        println!("Victorie!");
+                    },
+                    Some(ref name) => {
+                        println!("Lose. Câștigătorul este: {}", name);
+                    },
+                    None => {
+                        if args.reason == "tie" {
+                            println!("Egalitate!");
+                        } else {
+                            println!("Meciul s-a încheiat fără un câștigător clar.");
+                        }
+                    }
+                }
+                
+                // Pt finalizarea programului.
+                break; 
+            },
         }
     }
     Ok(())

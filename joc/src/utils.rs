@@ -1,7 +1,9 @@
 use rand::seq::SliceRandom;
+use std::collections::VecDeque;
+use std::collections::HashMap;
 
-/// Verifică dacă există obstacole (pereți) între două puncte folosind algoritmul Bresenham.
-/// Returnează `true` dacă glonțul poate ajunge la țintă (nu lovește pereți).
+
+// Returnează `true` dacă glonțul poate ajunge la țintă (nu lovește pereți).
 pub fn has_line_of_sight(grid: &Vec<Vec<i32>>, x0: i32, y0: i32, x1: i32, y1: i32) -> bool {
     let mut x = x0;
     let mut y = y0;
