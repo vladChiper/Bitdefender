@@ -86,3 +86,74 @@ pub fn get_random_valid_move(grid: &Vec<Vec<i32>>, cx: i32, cy: i32) -> (i32, i3
         *valid_moves.choose(&mut rng).unwrap_or(&(cx, cy))
     }
 }
+
+/// BFS adaptat pentru mișcări de câte 3 unități. Returnează următorul pas optim.
+pub fn bfs_next_step(grid: &Vec<Vec<i32>>, start: (i32, i32), goal: (i32, i32)) -> (i32, i32) {
+    let width = grid.len() as i32;
+    let height = if width > 0 { grid[0].len() as i32 } else { 0 };
+
+    let mut queue = VecDeque::new();
+    let mut visited = vec![vec![false; height as usize]; width as usize];
+    let mut parent = HashMap::new();
+
+    queue.push_back(start);
+    if start.0 >= 0 && start.0 < width && start.1 >= 0 && start.1 < height {
+        visited[start.0 as usize][start.1 as usize] = true;
+    }
+
+    let mut found = false;
+    let mut closest_node = start;
+    let mut min_distance = (start.0 - goal.0).abs() + (start.1 - goal.1).abs();
+
+    while let Some(curr) = queue.pop_front() {
+        if curr == goal {
+            found = true;
+            break;
+        }
+
+        let directions = [
+            (0, 3), (0, -3), (3, 0), (-3, 0),
+            (3, 3), (3, -3), (-3, 3), (-3, -3)
+        ];
+
+        for (dx, dy) in directions.iter() {
+            let nx = curr.0 + dx;
+            let ny = curr.1 + dy;
+
+            if nx >= 0 && nx < width && ny >= 0 && ny < height {
+                if !visited[nx as usize][ny as usize] && can_stand_at(grid, nx, ny) {
+                    visited[nx as usize][ny as usize] = true;
+                    parent.insert((nx, ny), curr);
+                    queue.push_back((nx, ny));
+
+                    // Ținem minte cel mai apropiat nod în caz că nu ajungem exact la destinație
+                    let dist = (nx - goal.0).abs() + (ny - goal.1).abs();
+                    if dist < min_distance {
+                        min_distance = dist;
+                        closest_node = (nx, ny);
+                    }
+                }
+            }
+        }
+    }
+
+    let target = if found { goal } else { closest_node };
+
+    if target == start {
+        return start; // Suntem deja acolo sau complet blocați
+    }
+
+    // Reconstruim drumul pentru a afla *primul* pas de făcut
+    let mut temp = target;
+    let mut first_step = target;
+    while temp != start {
+        first_step = temp; // Reținem ultimul nod înainte de start
+        if let Some(p) = parent.get(&temp) {
+            temp = *p;
+        } else {
+            break;
+        }
+    }
+
+    first_step
+}
