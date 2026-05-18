@@ -2,12 +2,16 @@ use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use std::collections::HashMap;
+use std::time::Duration;
 
 mod protocol;
 mod utils;
+mod simulator; // Terenul de joacă mental (Regulile jocului)
+mod mcts;      // Creierul care ghicește viitorul (UCB1)
 
 use crate::protocol::{Command, ErrorArgs, MoveArgs, ShootArgs, StartMatchArgs, StartTurnArgs};
+use crate::simulator::{Action, SimState};
+use crate::mcts::Mcts;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WebSocketMessage {
@@ -33,18 +37,14 @@ async fn main() -> anyhow::Result<()> {
     let (ws, _) = connect_async(url).await.unwrap();
     let (mut write, mut read) = ws.split();
 
-    println!("Conectat la server!");
+    println!("🔗 Conectat la server!");
 
     let mut my_player_id = 0;
     let mut map_width = 51;
     let mut map_height = 90;
     
+    // Harta fixă a lumii (Rămâne ca memorie globală pentru a o da rapid simulatorului)
     let mut world_grid: Vec<Vec<i32>> = Vec::new();
-
-    // Memoria comună a echipei
-    let mut last_known_enemies: HashMap<i32, (i32, i32)> = HashMap::new();
-    let mut locked_target_id: Option<i32> = None;
-    let mut initial_grouping_done = false;
 
     while let Some(msg) = read.next().await {
         let msg = msg.unwrap();
@@ -85,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
                 let setup_msg = WebSocketMessage {
                     command: Command::Practice,
                     args: serde_json::json!({
-                        "seed": null
+                        "seed": null,
                     }),
                 };
 
@@ -103,6 +103,7 @@ async fn main() -> anyhow::Result<()> {
                 map_width = args.config.width;
                 map_height = args.config.height;
                 
+                // Setăm harta de coliziuni (1 singură dată la început de meci)
                 world_grid = vec![vec![0; map_height as usize]; map_width as usize];
 
                 for wall in &args.state.walls {
@@ -116,200 +117,73 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                 }
-                
-                last_known_enemies.clear();
-                locked_target_id = None;
-                initial_grouping_done = false; 
             }
             Command::StartTurn => {
                 let args: StartTurnArgs = serde_json::from_value(message.args.clone())
                     .context("Parsing StartTurnArgs")?;
 
-                let my_heroes: Vec<&protocol::Hero> = args.state.heroes.iter()
-                    .filter(|h| h.owner_id == my_player_id)
-                    .collect();
-
-                let enemy_heroes: Vec<&protocol::Hero> = args.state.heroes.iter()
-                    .filter(|h| h.owner_id != my_player_id)
-                    .collect();
-
-                // 1. ACTUALIZAREA MEMORIEI
-                for enemy in &enemy_heroes {
-                    last_known_enemies.insert(enemy.id, (enemy.x, enemy.y));
-                }
-
-                // 2. VERIFICĂM CONTOPIREA EROILOR (la startul turnului)
-                if !initial_grouping_done {
-                    if my_heroes.len() >= 2 {
-                        let h0 = my_heroes[0];
-                        let h1 = my_heroes[1];
-                        if h0.x == h1.x && h0.y == h1.y {
-                            println!("🤝 Eroii s-au contopit perfect! Pornim tancul spre inamici.");
-                            initial_grouping_done = true;
-                        }
-                    } else {
-                        initial_grouping_done = true; 
-                    }
-                }
-
-                // 3. ACTUALIZAREA ȚINTEI COMUNE (LOCK-ON)
-                let visible_target = enemy_heroes.iter().min_by_key(|e| e.hp).copied();
-                if let Some(target) = visible_target {
-                    locked_target_id = Some(target.id);
-                } else {
-                    if let Some(id) = locked_target_id {
-                        if let Some(&(ex, ey)) = last_known_enemies.get(&id) {
-                            let reached = my_heroes.iter().any(|h| (h.x - ex).abs() <= 3 && (h.y - ey).abs() <= 3);
-                            if reached {
-                                locked_target_id = None;
-                                last_known_enemies.remove(&id);
-                            }
-                        }
-                    }
-                }
-
-                // 4. STABILIREA LIDERULUI ȘI A MUTĂRII LUI VIITOARE
-                let leader_id = my_heroes.iter().map(|h| h.id).min().unwrap_or(-1);
-                let leader_pos = my_heroes.iter().find(|h| h.id == leader_id).map(|h| (h.x, h.y)).unwrap_or((0,0));
+                // -----------------------------------------------------------
+                // AICI ÎNCEPE MAGIA MCTS
+                // -----------------------------------------------------------
                 
-                let mut leader_future_pos = leader_pos; 
+                // 1. Facem poza de memorie (SimState) pe care i-o vom da botului să se joace cu ea
+                let sim_state = SimState::from_state(&args.state, &world_grid, my_player_id, map_width, map_height);
+                
+                // 2. Inițializăm creierul MCTS la rădăcină
+                let mut mcts = Mcts::new(sim_state);
+                
+                // 3. Dăm drumul la simulări.
+                // Timpul per tur este de max ~300ms conform replay-urilor tale.
+                // Îi dăm botului 150 de milisecunde de gândire ca să fim super safe cu lag-ul de rețea.
+                let best_actions = mcts.search(Duration::from_millis(150));
 
-                let mut squad_target_x = 25; 
-                let mut squad_target_y = if my_player_id == 0 { map_height - 2 } else { 1 };
-
-                if !initial_grouping_done {
-                    squad_target_x = leader_pos.0;
-                    squad_target_y = if my_player_id == 0 { 10 } else { map_height - 11 };
-                } else if let Some(id) = locked_target_id {
-                    if let Some(&(ex, ey)) = last_known_enemies.get(&id) {
-                        squad_target_x = ex;
-                        squad_target_y = ey;
-                    }
-                }
-
-                // 5. SORTĂM EROII PENTRU A PROCESA LIDERUL PRIMUL
-                let mut sorted_heroes = my_heroes.clone();
-                sorted_heroes.sort_by_key(|h| h.id);
-
-                for hero in sorted_heroes {
-                    let mut action_sent = false;
-
-                    // 5.1 FAZA DE TRAGERE
-                    if hero.cooldown == 0 && !enemy_heroes.is_empty() {
-                        let target_to_shoot = if let Some(id) = locked_target_id {
-                            enemy_heroes.iter().find(|e| e.id == id).copied()
-                        } else { None };
-
-                        if let Some(target) = target_to_shoot {
-                            if utils::has_line_of_sight(&world_grid, hero.x, hero.y, target.x, target.y) {
-                                let shoot_command = WebSocketMessage {
-                                    command: Command::Shoot,
-                                    args: serde_json::to_value(ShootArgs {
-                                        hero_id: hero.id,
-                                        x: target.x,
-                                        y: target.y,
-                                        comment: Some("Focus Fire! 🎯".to_string()),
-                                    })?,
+                // 4. MCTS ne-a zis exact ce trebuie să facă fiecare erou în parte. Executăm!
+                for (hero_id, action) in best_actions {
+                    match action {
+                        Action::Move { x, y } => {
+                            let move_command = WebSocketMessage {
+                                command: Command::Move,
+                                args: serde_json::to_value(MoveArgs {
+                                    hero_id,
+                                    x,
+                                    y,
+                                    comment: Some("Calculated. 🤖".to_string()), 
+                                }).unwrap(),
+                            };
+                            send_command(&mut write, move_command).await.unwrap();
+                        },
+                        Action::Shoot { x, y } => {
+                            let shoot_command = WebSocketMessage {
+                                command: Command::Shoot,
+                                args: serde_json::to_value(ShootArgs {
+                                    hero_id,
+                                    x,
+                                    y,
+                                    comment: Some("MCTS Focus! 🎯".to_string()),
+                                }).unwrap(),
+                            };
+                            send_command(&mut write, shoot_command).await.unwrap();
+                        },
+                        Action::Wait => {
+                            // Căutăm eroul direct în lista oficială de la server (args.state.heroes)
+                            if let Some(hero) = args.state.heroes.iter().find(|h| h.id == hero_id) {
+                                let move_command = WebSocketMessage {
+                                    command: Command::Move,
+                                    args: serde_json::to_value(MoveArgs {
+                                        hero_id,
+                                        x: hero.x, // Trimitem Move exact pe poziția lui curentă!
+                                        y: hero.y,
+                                        comment: Some("Holding the line! 🛡️".to_string()),
+                                    }).unwrap(),
                                 };
-                                send_command(&mut write, shoot_command).await?;
-                                action_sent = true;
-                                
-                                if hero.id == leader_id {
-                                    leader_future_pos = (hero.x, hero.y);
-                                }
+                                // Acum serverul primește un răspuns și trece instant la runda următoare
+                                send_command(&mut write, move_command).await.unwrap();
+                                println!("🛡️ Eroul {} așteaptă tactic pe ({}, {}).", hero_id, hero.x, hero.y);
                             }
                         }
-
-                        if !action_sent {
-                            for target in &enemy_heroes {
-                                if utils::has_line_of_sight(&world_grid, hero.x, hero.y, target.x, target.y) {
-                                    let shoot_command = WebSocketMessage {
-                                    command: Command::Shoot,
-                                    args: serde_json::to_value(ShootArgs {
-                                        hero_id: hero.id,
-                                        x: target.x,
-                                        y: target.y,
-                                        comment: Some("Pow! 🔥".to_string()),
-                                        })?,
-                                    };  
-                                    send_command(&mut write, shoot_command).await?;
-                                    action_sent = true;
-                                    
-                                    if hero.id == leader_id {
-                                        leader_future_pos = (hero.x, hero.y);
-                                    }
-                                    break; 
-                                }
-                            }
-                        }
-                    }
-
-                    // 5.2 FAZA DE MIȘCARE
-                    if !action_sent {
-                        let mut next_pos = (hero.x, hero.y);
-
-                        if hero.id == leader_id {
-                            // DECIZIILE LIDERULUI
-                            if hero.cooldown > 0 {
-                                next_pos = utils::get_random_valid_move(&world_grid, hero.x, hero.y);
-                            } else {
-                                let mut target_x = squad_target_x;
-                                let mut target_y = squad_target_y;
-                                target_x = target_x.clamp(1, map_width - 2);
-                                target_x = target_x - (target_x.rem_euclid(3)) + 1;
-                                target_y = target_y - (target_y.rem_euclid(3)) + 1;
-
-                                next_pos = utils::bfs_next_step(&world_grid, (hero.x, hero.y), (target_x, target_y));
-
-                                if next_pos == (hero.x, hero.y) {
-                                    // Dacă s-au grupat deja global, facem mișcări random când ajungem la destinația finală
-                                    if initial_grouping_done {
-                                        next_pos = utils::get_random_valid_move(&world_grid, hero.x, hero.y);
-                                    }
-                                    // CRITIC: Dacă NU s-au grupat, Liderul stă nemișcat la Y=10 și își așteaptă partenerul!
-                                }
-                            }
-                            leader_future_pos = next_pos; 
-                            
-                        } else {
-                            // FOLLOWER-UL
-                            if hero.x == leader_pos.0 && hero.y == leader_pos.1 {
-                                // Dacă este pe aceeași poziție, copiază orbește mutarea Liderului
-                                next_pos = leader_future_pos;
-                            } else {
-                                // Dacă este despărțit, aleargă țintit după Lider
-                                next_pos = utils::bfs_next_step(&world_grid, (hero.x, hero.y), leader_pos);
-                                if next_pos == (hero.x, hero.y) && initial_grouping_done {
-                                    // Doar dacă sunt grupați teoretic dar blocați de un perete, dăm random move ca fallback
-                                    next_pos = utils::get_random_valid_move(&world_grid, hero.x, hero.y);
-                                }
-                                // CRITIC: Dacă nu s-au unit încă și a ajuns la Lider, stă pe loc pentru a activa contopirea în runda următoare!
-                            }
-                        }
-
-                        let mut taunt_msg = None;
-                        if hero.cooldown > 0 {
-                            taunt_msg = Some("Dodge! 🤸".to_string());
-                        } else if hero.id != leader_id && (hero.x == leader_pos.0 && hero.y == leader_pos.1) {
-                            taunt_msg = Some("Synced! 👯".to_string());
-                        } else if !initial_grouping_done {
-                            taunt_msg = Some("Wait up! 🤝".to_string());
-                        } else if locked_target_id.is_some() {
-                            taunt_msg = Some("Pushing! 👀".to_string());
-                        }
-
-                        let move_command = WebSocketMessage {
-                            command: Command::Move,
-                            args: serde_json::to_value(MoveArgs {
-                                hero_id: hero.id,
-                                x: next_pos.0,
-                                y: next_pos.1,
-                                comment: taunt_msg, 
-                            })?,
-                        };
-                        send_command(&mut write, move_command).await?;
                     }
                 }
+                // -----------------------------------------------------------
             }
             Command::Move => (),
             Command::Shoot => (),
@@ -317,20 +191,11 @@ async fn main() -> anyhow::Result<()> {
                 let args: protocol::EndMatchArgs = serde_json::from_value(message.args.clone())
                     .context("Parsing EndMatchArgs")?;
                 
+                println!("🏁 Meciul s-a terminat! Motiv: {}", args.reason);
                 match args.winner {
-                    Some(ref name) if name == "vladChiper" => {
-                        println!("🏆 Victorie!");
-                    },
-                    Some(ref name) => {
-                        println!("💀 Lose. Câștigătorul este: {}", name);
-                    },
-                    None => {
-                        if args.reason == "tie" {
-                            println!("🤝 Egalitate!");
-                        } else {
-                            println!("Meciul s-a încheiat fără un câștigător clar.");
-                        }
-                    }
+                    Some(ref name) if name == "vladChiper" => println!("🏆 Victorie supremă MCTS!"),
+                    Some(ref name) => println!("💀 Am pierdut. Inamicul a fost mai bun: {}", name),
+                    None => println!("🤝 Egalitate!"),
                 }
                 break; 
             },
