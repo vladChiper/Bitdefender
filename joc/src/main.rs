@@ -85,21 +85,21 @@ async fn main() -> anyhow::Result<()> {
                 println!("Suntem gata! Începem...");
 
                 //Ranked mode
-                let setup_msg = WebSocketMessage {
-                    command: Command::Challenge,
-                    args: serde_json::json!({"seed": null,
-                    "ranked": true
-                    }),
-                };
+                // let setup_msg = WebSocketMessage {
+                //     command: Command::Challenge,
+                //     args: serde_json::json!({"seed": null,
+                //     "ranked": true
+                //     }),
+                // };
 
                 //Practice mode
 
-                // let setup_msg = WebSocketMessage {
-                //     command: Command::Practice,
-                //     args: serde_json::json!({
-                //         "seed": null
-                //     }),
-                // };
+                let setup_msg = WebSocketMessage {
+                    command: Command::Practice,
+                    args: serde_json::json!({
+                        "seed": null
+                    }),
+                };
 
                 send_command(&mut write, setup_msg).await.expect("Failed to start practice");
             }
@@ -170,6 +170,7 @@ async fn main() -> anyhow::Result<()> {
                                         hero_id: hero.id,
                                         x: target.x,
                                         y: target.y,
+                                        comment: Some("POW!!".to_string()), // <-- Mesajul tău aici
                                     })?,
                                 };
                                 send_command(&mut write, shoot_command).await?;
@@ -183,13 +184,14 @@ async fn main() -> anyhow::Result<()> {
                             for target in &enemy_heroes {
                                 if utils::has_line_of_sight(&world_grid, hero.x, hero.y, target.x, target.y) {
                                     let shoot_command = WebSocketMessage {
-                                        command: Command::Shoot,
-                                        args: serde_json::to_value(ShootArgs {
-                                            hero_id: hero.id,
-                                            x: target.x,
-                                            y: target.y,
+                                    command: Command::Shoot,
+                                    args: serde_json::to_value(ShootArgs {
+                                        hero_id: hero.id,
+                                        x: target.x,
+                                        y: target.y,
+                                        comment: Some("Shoot".to_string()), // <-- Mesajul tău aici
                                         })?,
-                                    };
+                                    };  
                                     send_command(&mut write, shoot_command).await?;
                                     println!("💥 Eroul {} trage spre inamicul {} la ({}, {})!", hero.id, target.id, target.x, target.y);
                                     action_sent = true;
@@ -246,14 +248,23 @@ async fn main() -> anyhow::Result<()> {
                                 hero.id, target_x, target_y, next_pos.0, next_pos.1);
                         }
 
+                        let mut taunt_msg = None;
+                        if hero.cooldown > 0 {
+                            taunt_msg = Some("FUG!".to_string());
+                        } else if !last_known_enemies.is_empty() {
+                            taunt_msg = Some("go home".to_string());
+                        }
+
                         let move_command = WebSocketMessage {
                             command: Command::Move,
                             args: serde_json::to_value(MoveArgs {
                                 hero_id: hero.id,
                                 x: next_pos.0,
                                 y: next_pos.1,
+                                comment: taunt_msg, // <-- Atașează mesajul dinamic
                             })?,
                         };
+
                         send_command(&mut write, move_command).await?;
                     }
                 }
