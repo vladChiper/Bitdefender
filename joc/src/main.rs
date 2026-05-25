@@ -3,6 +3,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use std::time::Duration;
+use std::collections::HashMap;
 
 mod protocol;
 mod utils;
@@ -46,6 +47,9 @@ async fn main() -> anyhow::Result<()> {
     // Harta fixă a lumii (Rămâne ca memorie globală pentru a o da rapid simulatorului)
     let mut world_grid: Vec<Vec<i32>> = Vec::new();
 
+    // Reține ID-ul inamicului și ultima poziție (x, y) în care a fost văzut
+    let mut last_known_enemies: std::collections::HashMap<i32, (i32, i32)> = std::collections::HashMap::new();
+
     while let Some(msg) = read.next().await {
         let msg = msg.unwrap();
         let text = match msg {
@@ -82,10 +86,13 @@ async fn main() -> anyhow::Result<()> {
             Command::Ready => {
                 println!("Suntem gata! Începem...");
 
-                let setup_msg = WebSocketMessage {
+                let setup_msg: WebSocketMessage = WebSocketMessage {
                     command: Command::Practice,
                     args: serde_json::json!({
                         "seed": null,
+                        "ranked": false,
+                        "my_id": 1,
+                        "name": "robertcd29",
                     }),
                 };
 
@@ -96,6 +103,12 @@ async fn main() -> anyhow::Result<()> {
             Command::StartMatch => {
                 let args: StartMatchArgs = serde_json::from_value(message.args.clone())
                     .context("Parsing StartMatchArgs")?;
+
+                for hero in &args.state.heroes {
+                    if hero.owner_id != my_player_id {
+                        last_known_enemies.insert(hero.id, (hero.x, hero.y));
+                    }
+                }
 
                 println!("🏁 Meci început! ID: {}", args.match_id);
                 my_player_id = args.your_player_id;
@@ -122,68 +135,53 @@ async fn main() -> anyhow::Result<()> {
                 let args: StartTurnArgs = serde_json::from_value(message.args.clone())
                     .context("Parsing StartTurnArgs")?;
 
-                // -----------------------------------------------------------
-                // AICI ÎNCEPE MAGIA MCTS
-                // -----------------------------------------------------------
-                
-                // 1. Facem poza de memorie (SimState) pe care i-o vom da botului să se joace cu ea
                 let sim_state = SimState::from_state(&args.state, &world_grid, my_player_id, map_width, map_height);
-                
-                // 2. Inițializăm creierul MCTS la rădăcină
                 let mut mcts = Mcts::new(sim_state);
                 
-                // 3. Dăm drumul la simulări.
-                // Timpul per tur este de max ~300ms conform replay-urilor tale.
-                // Îi dăm botului 150 de milisecunde de gândire ca să fim super safe cu lag-ul de rețea.
                 let best_actions = mcts.search(Duration::from_millis(150));
 
-                // 4. MCTS ne-a zis exact ce trebuie să facă fiecare erou în parte. Executăm!
                 for (hero_id, action) in best_actions {
                     match action {
                         Action::Move { x, y } => {
                             let move_command = WebSocketMessage {
                                 command: Command::Move,
-                                args: serde_json::to_value(MoveArgs {
+                                args: serde_json::json!(MoveArgs {
                                     hero_id,
                                     x,
                                     y,
-                                    comment: Some("Calculated. 🤖".to_string()), 
-                                }).unwrap(),
+                                    comment: Some("TACTICAL PUSH! 🚀".to_string()), 
+                                }),
                             };
                             send_command(&mut write, move_command).await.unwrap();
                         },
                         Action::Shoot { x, y } => {
                             let shoot_command = WebSocketMessage {
                                 command: Command::Shoot,
-                                args: serde_json::to_value(ShootArgs {
+                                args: serde_json::json!(ShootArgs {
                                     hero_id,
                                     x,
                                     y,
-                                    comment: Some("MCTS Focus! 🎯".to_string()),
-                                }).unwrap(),
+                                    comment: Some("MCTS Sniper Elite! 🎯".to_string()),
+                                }),
                             };
                             send_command(&mut write, shoot_command).await.unwrap();
                         },
                         Action::Wait => {
-                            // Căutăm eroul direct în lista oficială de la server (args.state.heroes)
                             if let Some(hero) = args.state.heroes.iter().find(|h| h.id == hero_id) {
                                 let move_command = WebSocketMessage {
                                     command: Command::Move,
-                                    args: serde_json::to_value(MoveArgs {
+                                    args: serde_json::json!(MoveArgs {
                                         hero_id,
-                                        x: hero.x, // Trimitem Move exact pe poziția lui curentă!
+                                        x: hero.x,
                                         y: hero.y,
                                         comment: Some("Holding the line! 🛡️".to_string()),
-                                    }).unwrap(),
+                                    }),
                                 };
-                                // Acum serverul primește un răspuns și trece instant la runda următoare
                                 send_command(&mut write, move_command).await.unwrap();
-                                println!("🛡️ Eroul {} așteaptă tactic pe ({}, {}).", hero_id, hero.x, hero.y);
                             }
                         }
                     }
                 }
-                // -----------------------------------------------------------
             }
             Command::Move => (),
             Command::Shoot => (),

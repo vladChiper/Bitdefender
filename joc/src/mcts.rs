@@ -166,7 +166,7 @@ impl Mcts {
             }
         }
         
-        println!("🧠 MCTS a rulat {} viitoruri posibile! Mutarea aleasă a fost explorată de {} ori.", iterations, best_visits);
+        println!("🧠 MCTS a rulat {} mutari posibile! Mutarea aleasă a fost explorată de {} ori.", iterations, best_visits);
         best_action
     }
 

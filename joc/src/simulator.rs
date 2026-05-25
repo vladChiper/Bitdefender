@@ -118,6 +118,26 @@ impl SimState {
     pub fn get_possible_actions(&self, hero: &SimHero) -> Vec<Action> {
         let mut actions = vec![Action::Wait];
         if hero.hp <= 0 { return actions; }
+
+        let mut actions = Vec::new();
+        let mut in_danger = false;
+
+        // Verificăm dacă un inamic se uită la noi și noi nu putem trage
+        if hero.cooldown > 0 {
+            let enemies = if hero.owner_id == self.my_player_id { &self.enemy_heroes } else { &self.my_heroes };
+            for enemy in enemies {
+                if enemy.hp > 0 && enemy.cooldown == 0 && utils::has_line_of_sight(&self.grid, enemy.x, enemy.y, hero.x, hero.y) {
+                    in_danger = true;
+                    break;
+                }
+            }
+        }
+
+        // Dacă nu e panică, putem să stăm pe loc
+        if !in_danger {
+            actions.push(Action::Wait);
+        } 
+        // Dacă este panică, `Wait` NU va fi generat! Eroul va fi forțat să aleagă un `Move` generat mai jos.
         
         let directions = [(0, 3), (0, -3), (3, 0), (-3, 0), (3, 3), (3, -3), (-3, 3), (-3, -3)];
         for (dx, dy) in directions.iter() {
@@ -129,13 +149,22 @@ impl SimState {
         }
 
         if hero.cooldown == 0 {
-            let targets = if hero.owner_id == self.my_player_id { &self.enemy_heroes } else { &self.my_heroes };
-            for enemy in targets {
-                if enemy.hp > 0 && utils::has_line_of_sight(&self.grid, hero.x, hero.y, enemy.x, enemy.y) {
-                    actions.push(Action::Shoot { x: enemy.x, y: enemy.y });
-                }
-            }
+    let targets = if hero.owner_id == self.my_player_id { &self.enemy_heroes } else { &self.my_heroes };
+    for enemy in targets {
+        if enemy.hp > 0 && utils::has_line_of_sight(&self.grid, hero.x, hero.y, enemy.x, enemy.y) {
+            // Calculăm vectorul de direcție
+            let dx = enemy.x - hero.x;
+            let dy = enemy.y - hero.y;
+            
+            // Înmulțim cu o valoare absurd de mare ca să treacă de el până în marginea hărții.
+            // Bresenham din simulator oricum se oprește la perete.
+            let target_x = hero.x + (dx * 100); 
+            let target_y = hero.y + (dy * 100);
+
+            actions.push(Action::Shoot { x: target_x, y: target_y });
         }
+    }
+}
         actions
     }
 
@@ -290,6 +319,17 @@ impl SimState {
             if h.hp > 0 {
                 my_score += h.hp as f32;
                 my_score += 10000.0; 
+                
+                // --- AICI ESTE SECRETUL AVANSĂRII AGRESIVE ---
+                if self.my_player_id == 1 {
+                    // Player 1 e jos (y mare, ex 88). Vrem să ajungă sus (y mic).
+                    // Cu cât y e mai mic, cu atât scorul devine mai mare.
+                    my_score += (self.map_height - h.y) as f32 * 50.0; 
+                } else {
+                    // Player 0 e sus (y mic, ex 1). Vrem să ajungă jos (y mare).
+                    my_score += h.y as f32 * 50.0;
+                }
+
             } else {
                 my_score -= 10000.0; 
             }
@@ -301,6 +341,20 @@ impl SimState {
                 enemy_score += 10000.0; 
             } else {
                 enemy_score -= 10000.0; 
+            }
+        }
+
+        // TACTICA TA: Contopirea (Stack 2v1)
+        if self.my_heroes.len() == 2 {
+            let h1 = &self.my_heroes[0];
+            let h2 = &self.my_heroes[1];
+            if h1.hp > 0 && h2.hp > 0 {
+                let distance = (h1.x - h2.x).abs() + (h1.y - h2.y).abs();
+                if distance == 0 {
+                    my_score += 15000.0; // Bonus masiv dacă se unesc
+                } else {
+                    my_score -= distance as f32 * 20.0; // Se caută unul pe altul
+                }
             }
         }
 
