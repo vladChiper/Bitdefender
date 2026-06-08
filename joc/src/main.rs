@@ -73,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
                     &mut write,
                     WebSocketMessage {
                         command: Command::Login,
-                        args: serde_json::json!({"version": 1, "name": "vladChiper"}),
+                        args: serde_json::json!({"version": 1, "name": "vladChiper1"}),
                     },
                 ).await.expect("Failed to send login");
             }
@@ -87,16 +87,16 @@ async fn main() -> anyhow::Result<()> {
                 println!("Suntem gata! Începem...");
 
                 let setup_msg: WebSocketMessage = WebSocketMessage {
-                    command: Command::Practice,
+                    command: Command::Challenge,
                     args: serde_json::json!({
                         "seed": null,
                         "ranked": false,
-                        "my_id": 1,
-                        "name": "robertcd29",
+                        "my_id": 0,
+                        "name": "vladChiper",
                     }),
                 };
 
-                send_command(&mut write, setup_msg).await.expect("Failed to start practice");
+                send_command(&mut write, setup_msg).await.expect("Failed to start challenge");
             }
             Command::Challenge => println!("You have been challenged!"),
             Command::Practice => println!("Modul de antrenament activat!"),
